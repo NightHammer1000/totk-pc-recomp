@@ -304,8 +304,12 @@ static void flip_locked(void) {
                            .pImageIndices = &g_flip_idx};
     rsf_vk_present_event(source, 1);
     vk_queue_lock();
-    VkResult r = g_rsf_present ? (VkResult)rsf_present_flip(g_rsf_present, &pi)
-                               : vkQueuePresentKHR(vk_ctx()->gfx_queue, &pi);
+    VkResult r;
+    if (g_rsf_present) {
+        rsf_frame_record identity = {.struct_size = sizeof identity, .abi_version = RSF_GAME_FRAME_ABI_VERSION,
+            .session_id = 1, .frame_id = source, .view_id = 1};
+        r = (VkResult)rsf_present_flip(g_rsf_present, &pi, source ? &identity : NULL);
+    } else r = vkQueuePresentKHR(vk_ctx()->gfx_queue, &pi);
     vk_queue_unlock();
     rsf_vk_present_event(source, 0);
     if ((rt_trace & RT_TRACE_PRESENT) && source && (source <= 16 || !(source % 600)))
