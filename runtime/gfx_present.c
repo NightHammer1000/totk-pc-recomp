@@ -150,6 +150,7 @@ static VkDeviceSize g_cap_size;
 static int g_cap_w, g_cap_h, g_cap_valid;
 static int g_flip_on;            // vk_present_blit submitted the blit of swapchain image g_flip_idx; vk_present_flip presents it
 static uint32_t g_flip_idx;
+static uint64_t g_flip_source;    // owned by the pending swapchain image, under g_pl
 
 // ---- TOTK_FLIGHT thumbnails (flight.c; g_pl): each present also blits the swapchain image down into slot frame % g_th_n
 // of a host-visible ring. A slot's tag names the frame it holds complete; recording a new frame clears the tag first,
@@ -294,6 +295,8 @@ const char *gfx_window_present_mode(void) { return __atomic_load_n(&g_present_go
 static void flip_locked(void) {
     if (!g_flip_on) return;
     g_flip_on = 0;
+    uint64_t source = g_flip_source;
+    g_flip_source = 0;
     if (!g_sc) return;
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1,
                            .pWaitSemaphores = &g_render_done[g_flip_idx], .swapchainCount = 1, .pSwapchains = &g_sc,
@@ -302,6 +305,8 @@ static void flip_locked(void) {
     VkResult r = g_rsf_present ? (VkResult)rsf_present_flip(g_rsf_present, &pi)
                                : vkQueuePresentKHR(vk_ctx()->gfx_queue, &pi);
     vk_queue_unlock();
+    if ((rt_trace & RT_TRACE_PRESENT) && source && (source <= 16 || !(source % 600)))
+        rt_log("rsf host present: source %llu image %u result %d", (unsigned long long)source, g_flip_idx, (int)r);
     vk_device_fault_report(r);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) plat_xchg32(&g_dirty, 1);
 }
@@ -673,7 +678,7 @@ void gfx_fit_rect(int cw, int ch, int dw, int dh, int out[4]) {
     out[0] = (dw - out[2]) / 2, out[1] = (dh - out[3]) / 2;
 }
 
-static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4], int defer) {
+static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4], int defer, uint64_t source) {
     int general = layout == VK_IMAGE_LAYOUT_GENERAL;
     gfx_window_start();
     VkCtx *c = vk_ctx();
@@ -840,6 +845,7 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     if (r == VK_SUCCESS) {
         g_flip_on = 1;
         g_flip_idx = idx;
+        g_flip_source = source;
         if (!defer) flip_locked();
     } else {
         vk_device_fault_report(r);
@@ -859,11 +865,11 @@ out:
 }
 
 void vk_present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4]) {
-    present_image(src, layout, fmt, w, h, crop, 0);
+    present_image(src, layout, fmt, w, h, crop, 0, 0);
 }
 
-void vk_present_blit(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4]) {
-    present_image(src, layout, fmt, w, h, crop, 1);
+void vk_present_blit(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4], uint64_t source_frame) {
+    present_image(src, layout, fmt, w, h, crop, 1, source_frame);
 }
 
 void vk_present_flip(void) {
@@ -887,6 +893,7 @@ int gfx_window_release_vk(void) {
     if (c && (g_started || g_sc || g_rsf_present)) {
         if (!retire_swapchain()) { plat_rmutex_unlock(&g_pl); return 0; }
         g_flip_on = 0;   // its blit is done (device idle); the swapchain goes away unpresented
+        g_flip_source = 0;
         menu_vk_release();
         vk_fsr_release();
         vk_color_release();
